@@ -1,5 +1,5 @@
 import streamlit as st
-from pyairtable import Api
+import requests
 from streamlit_drawable_canvas import st_canvas
 import time
 
@@ -10,7 +10,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Estilos CSS
+# Estilos CSS para móviles
 st.markdown("""
     <style>
     .stButton>button {
@@ -28,125 +28,135 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Credenciales desde Secrets
-AIRTABLE_TOKEN = st.secrets.get("AIRTABLE_TOKEN", "")
-BASE_ID = st.secrets.get("BASE_ID", "")
+AIRTABLE_TOKEN = st.secrets.get("AIRTABLE_TOKEN", "").strip()
+BASE_ID = st.secrets.get("BASE_ID", "").strip()
 TABLE_NAME = "Seguimiento producción"
 
-# Carga segura controlando la tasa de peticiones
-def obtener_datos_airtable():
-    api = Api(AIRTABLE_TOKEN)
-    table = api.table(BASE_ID, TABLE_NAME)
-    records = table.all()
-    datos = []
-    for r in records:
-        row = r['fields']
-        row['id'] = r['id']
-        datos.append(row)
-    return datos
+# Función de consulta directa vía API REST
+def obtener_datos():
+    url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        records = response.json().get("records", [])
+        datos = []
+        for r in records:
+            row = r.get("fields", {})
+            row["id"] = r.get("id")
+            datos.append(row)
+        return datos, None
+    else:
+        return None, f"Error {response.status_code}: {response.text}"
 
-# Inicialización en la memoria de la sesión activa
-if "datos_libros" not in st.session_state:
-    try:
-        st.session_state["datos_libros"] = obtener_datos_airtable()
-    except Exception:
-        st.session_state["datos_libros"] = None
+# Carga inicial en la sesión
+if "datos_libros" not in st.session_state or st.session_state["datos_libros"] is None:
+    datos, error = obtener_datos()
+    st.session_state["datos_libros"] = datos
+    st.session_state["error_airtable"] = error
 
 st.title("📱 Producción de Libros")
 
-# Botón para refrescar datos solo cuando el usuario lo pida
+# Botón para refrescar
 if st.button("🔄 Actualizar datos de Airtable"):
-    try:
-        st.session_state["datos_libros"] = obtener_datos_airtable()
-        st.success("¡Datos actualizados!")
+    datos, error = obtener_datos()
+    st.session_state["datos_libros"] = datos
+    st.session_state["error_airtable"] = error
+    if datos:
+        st.success("¡Datos cargados correctamente!")
         time.sleep(0.5)
         st.rerun()
-    except Exception:
-        st.error("Airtable sigue bloqueado. Espera 30 segundos más antes de pulsar de nuevo.")
 
-# Verificar estado de datos
+# Control de errores y renderizado
+error = st.session_state.get("error_airtable")
 datos = st.session_state.get("datos_libros")
 
-if datos is None:
-    st.warning("⏳ Esperando a que Airtable libere el límite de conexiones. Aguarda 30 segundos y pulsa 'Actualizar datos de Airtable'.")
-else:
-    try:
-        api = Api(AIRTABLE_TOKEN)
-        table = api.table(BASE_ID, TABLE_NAME)
+if error:
+    st.error(f"⚠️ Detalle de la conexión con Airtable:\n\n{error}")
+    st.info("💡 Si sale error 403 o 404, revisa en airtable.com/create/tokens que el token tenga acceso a la base 'Producción libros Algani + Ibhuku 2026'.")
+elif datos is not None:
+    # --- BARRA LATERAL: FILTROS ---
+    st.sidebar.header("🔍 Filtros")
+    
+    editoriales = list(set([d.get("Editorial", "Sin asignación") for d in datos if "Editorial" in d]))
+    ed_seleccionada = st.sidebar.multiselect("Editorial:", editoriales, default=editoriales)
+    
+    estados_autor = list(set([d.get("Revisión Autor", "Sin estado") for d in datos if "Revisión Autor" in d]))
+    estado_autor_sel = st.sidebar.multiselect("Revisión Autor:", estados_autor, default=estados_autor)
 
-        # --- BARRA LATERAL: FILTROS ---
-        st.sidebar.header("🔍 Filtros")
+    # Filtrar datos
+    datos_filtrados = [
+        d for d in datos 
+        if d.get("Editorial") in ed_seleccionada 
+        and d.get("Revisión Autor", "Sin estado") in estado_autor_sel
+    ]
+
+    # --- MÉTRICAS VISTA MÓVIL ---
+    st.metric("Total Libros", len(datos_filtrados))
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        st.metric("Pendientes Autor", len([d for d in datos_filtrados if d.get("Revisión Autor") == "Pendiente"]))
+    with col_m2:
+        st.metric("Aprobados", len([d for d in datos_filtrados if d.get("Revisión Autor") == "Aprobado"]))
+
+    st.divider()
+
+    # --- LISTA DE LIBROS Y MÓDULO DE FIRMA ---
+    st.subheader("📚 Libros en Edición")
+
+    for libro in datos_filtrados:
+        titulo = libro.get('Titulo Libro', 'Sin Título')
+        editorial = libro.get('Editorial', 'Sin Editorial')
+        rev_autor = libro.get('Revisión Autor', 'Pendiente')
         
-        editoriales = list(set([d.get("Editorial", "Sin asignación") for d in datos if "Editorial" in d]))
-        ed_seleccionada = st.sidebar.multiselect("Editorial:", editoriales, default=editoriales)
-        
-        estados_autor = list(set([d.get("Revisión Autor", "Sin estado") for d in datos if "Revisión Autor" in d]))
-        estado_autor_sel = st.sidebar.multiselect("Revisión Autor:", estados_autor, default=estados_autor)
-
-        # Filtrar datos
-        datos_filtrados = [
-            d for d in datos 
-            if d.get("Editorial") in ed_seleccionada 
-            and d.get("Revisión Autor", "Sin estado") in estado_autor_sel
-        ]
-
-        # --- MÉTRICAS VISTA MÓVIL ---
-        st.metric("Total Libros", len(datos_filtrados))
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            st.metric("Pendientes Autor", len([d for d in datos_filtrados if d.get("Revisión Autor") == "Pendiente"]))
-        with col_m2:
-            st.metric("Aprobados", len([d for d in datos_filtrados if d.get("Revisión Autor") == "Aprobado"]))
-
-        st.divider()
-
-        # --- LISTA DE LIBROS Y MÓDULO DE FIRMA ---
-        st.subheader("📚 Libros en Edición")
-
-        for libro in datos_filtrados:
-            titulo = libro.get('Titulo Libro', 'Sin Título')
-            editorial = libro.get('Editorial', 'Sin Editorial')
-            rev_autor = libro.get('Revisión Autor', 'Pendiente')
+        with st.expander(f"📖 {titulo} ({editorial})"):
+            st.markdown(f"**Estado Global:** {libro.get('Estado global', 'En curso')}")
+            st.write(f"💰 **Presupuesto:** {libro.get('Presupuesto', 'N/A')} | **50% Pago:** {'✅' if libro.get('50% €') else '❌'}")
             
-            with st.expander(f"📖 {titulo} ({editorial})"):
-                st.markdown(f"**Estado Global:** {libro.get('Estado global', 'En curso')}")
-                st.write(f"💰 **Presupuesto:** {libro.get('Presupuesto', 'N/A')} | **50% Pago:** {'✅' if libro.get('50% €') else '❌'}")
-                
-                st.markdown("---")
-                st.write(f"📝 **Rev. Editorial:** {libro.get('Revisión Editorial', 'N/A')}")
-                st.write(f"📐 **Maquetación:** {libro.get('Maquetación', 'N/A')}")
-                st.write(f"🎨 **Portada:** {libro.get('Portada', 'N/A')}")
-                st.write(f"✍️ **Rev. Autor:** {rev_autor}")
-                st.write(f"⚖️ **Depósito Legal:** {'✅' if libro.get('Depósito Legal') else '⏳'}")
+            st.markdown("---")
+            st.write(f"📝 **Rev. Editorial:** {libro.get('Revisión Editorial', 'N/A')}")
+            st.write(f"📐 **Maquetación:** {libro.get('Maquetación', 'N/A')}")
+            st.write(f"🎨 **Portada:** {libro.get('Portada', 'N/A')}")
+            st.write(f"✍️ **Rev. Autor:** {rev_autor}")
+            st.write(f"⚖️ **Depósito Legal:** {'✅' if libro.get('Depósito Legal') else '⏳'}")
 
-                st.markdown("---")
-                st.markdown("#### ✍️ Firma de Conformidad")
+            st.markdown("---")
+            st.markdown("#### ✍️ Firma de Conformidad")
+            
+            if rev_autor == "Aprobado":
+                st.success("✅ Este libro ya fue firmado y aprobado.")
+            else:
+                st.caption("Firma con el dedo dentro del recuadro:")
                 
-                if rev_autor == "Aprobado":
-                    st.success("✅ Este libro ya fue firmado y aprobado.")
-                else:
-                    st.caption("Firma con el dedo dentro del recuadro:")
-                    
-                    canvas_result = st_canvas(
-                        fill_color="rgba(255, 255, 255, 0)",
-                        stroke_width=3,
-                        stroke_color="#000000",
-                        background_color="#FFFFFF",
-                        height=160,
-                        width=280,
-                        drawing_mode="freedraw",
-                        key=f"canvas_{libro['id']}",
-                    )
+                canvas_result = st_canvas(
+                    fill_color="rgba(255, 255, 255, 0)",
+                    stroke_width=3,
+                    stroke_color="#000000",
+                    background_color="#FFFFFF",
+                    height=160,
+                    width=280,
+                    drawing_mode="freedraw",
+                    key=f"canvas_{libro['id']}",
+                )
 
-                    if st.button("Guardar Firma y Aprobar", key=f"btn_{libro['id']}"):
-                        if canvas_result.image_data is not None:
-                            table.update(libro['id'], {
-                                "Revisión Autor": "Aprobado"
-                            })
-                            # Actualizamos memoria local e invocamos recarga
-                            st.session_state["datos_libros"] = obtener_datos_airtable()
+                if st.button("Guardar Firma y Aprobar", key=f"btn_{libro['id']}"):
+                    if canvas_result.image_data is not None:
+                        # Actualizar vía API PATCH directa
+                        patch_url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}/{libro['id']}"
+                        patch_headers = {
+                            "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+                            "Content-Type": "application/json"
+                        }
+                        payload = {"fields": {"Revisión Autor": "Aprobado"}}
+                        res = requests.patch(patch_url, json=payload, headers=patch_headers)
+                        
+                        if res.status_code == 200:
+                            datos, _ = obtener_datos()
+                            st.session_state["datos_libros"] = datos
                             st.success(f"¡'{titulo}' actualizado como Aprobado!")
                             time.sleep(0.5)
                             st.rerun()
-
-    except Exception as e:
-        st.error(f"Error procesando la información: {e}")
+                        else:
+                            st.error(f"Error guardando cambios: {res.text}")
